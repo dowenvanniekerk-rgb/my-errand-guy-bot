@@ -1,466 +1,443 @@
-# =====================================================
-#  My Errand Guy Bot v3.0
-#  Full Ops Suite:
-#   - /newerrand
-#   - /assign
-#   - /update
-#   - /complete
-#   - /cancel
-#   - /pay
-#   - /unpay
-#   - /summary (today only)
-#   - /help
-#   - OTP verification via "Errand #1234 OTP 9999"
-#
-#  Sheet columns (must match EXACTLY, row 1):
-#  A: Errand ID
-#  B: Requester Name
-#  C: Receiver Name
-#  D: Pickup
-#  E: Drop-off
-#  F: Status
-#  G: OTP
-#  H: Driver
-#  I: Timestamp
-#  J: Paid (Y/N)
-#
-#  Brand voice:
-#    "My Errand Guy — we run so you don't have to 🧡"
-# =====================================================
+import os
+import json
+import random
+import datetime
+import pytz
+import gspread
+from oauth2client.service_account import ServiceAccountCredentials
+from telegram.ext import Updater, CommandHandler
+from telegram import ParseMode
 
-from telegram import Update
-from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
-import random, datetime, gspread
-from google.oauth2.service_account import Credentials
+# =========================
+# CONFIG / GLOBALS
+# =========================
 
-# ---------- CONFIG ----------
-BOT_TOKEN = "8291555868:AAEoHFlEDm6hNg5PD4AUm7Y5hO-8aiIQQeU"
-SHEET_NAME = "Errand Log"
-CREDENTIALS_FILE = "credentials.json"
+# Env vars from Render dashboard
+BOT_TOKEN = os.environ.get("8291555868:AAEoHFlEDm6hNg5PD4AUm7Y5hO-8aiIQQeU")              # e.g. 8291:AA....
+SHEET_NAME = os.environ.get("SHEET_NAME")            # e.g. MyErrandGuy
+SERVICE_ACCOUNT_JSON = os.environ.get("SERVICE_ACCOUNT_JSON")  # full JSON of google creds
+LOCAL_TZ = os.environ.get("TIMEZONE", "Africa/Windhoek")
 
-# ---------- GOOGLE SHEETS SETUP ----------
-scope = [
-    "https://www.googleapis.com/auth/spreadsheets",
-    "https://www.googleapis.com/auth/drive"
-]
-creds = Credentials.from_service_account_file(CREDENTIALS_FILE, scopes=scope)
-client = gspread.authorize(creds)
-sheet = client.open(SHEET_NAME).sheet1  # "Sheet1" tab assumed
+# Google Sheets columns (1-based index)
+COL_ID = 1
+COL_REQUESTER = 2
+COL_RECEIVER = 3
+COL_PICKUP = 4
+COL_DROPOFF = 5
+COL_STATUS = 6
+COL_OTP = 7
+COL_DRIVER = 8
+COL_TIMESTAMP = 9
+COL_PAID = 10
 
-# column indexes for clarity
-COL_ERRAND_ID = 1      # A
-COL_REQUESTER = 2      # B
-COL_RECEIVER = 3       # C
-COL_PICKUP = 4         # D
-COL_DROPOFF = 5        # E
-COL_STATUS = 6         # F
-COL_OTP = 7            # G
-COL_DRIVER = 8         # H
-COL_TIMESTAMP = 9      # I
-COL_PAID = 10          # J
+# -------------------------
+# build Google Sheets client
+# -------------------------
 
-# ---------- HELPERS ----------
-def get_all_records_with_rows():
-    """Return list of (row_number, row_dict) for all rows that have data."""
-    records = sheet.get_all_records()
-    out = []
-    # records[0] corresponds to row 2
-    for i, row in enumerate(records, start=2):
-        out.append((i, row))
-    return out
+def build_sheet_client():
+    # Write service account json from env into a temp file, so gspread can read it
+    creds_dict = json.loads(SERVICE_ACCOUNT_JSON)
+    tmp_path = "/tmp/service_account.json"
+    with open(tmp_path, "w") as f:
+        json.dump(creds_dict, f)
 
-def find_errand_row(errand_id: str):
-    """
-    Find the Google Sheets row number for a given errand id (string, no '#').
-    Returns row number (int) or None.
-    """
-    rows = get_all_records_with_rows()
-    for row_num, data in rows:
-        if data.get('Errand ID') == f"#{errand_id}":
-            return row_num
-    return None
+    scope = [
+        "https://www.googleapis.com/auth/spreadsheets",
+        "https://www.googleapis.com/auth/drive"
+    ]
+    creds = ServiceAccountCredentials.from_json_keyfile_name(tmp_path, scope)
+    gc = gspread.authorize(creds)
 
-def now_timestamp():
-    return datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
+    # open workbook
+    sh = gc.open(SHEET_NAME)
+    # first sheet/tab
+    ws = sh.sheet1
+    return ws
 
-def today_date_str():
-    # for summary grouping by date only
-    return datetime.datetime.now().strftime("%Y-%m-%d")
+sheet = build_sheet_client()
 
-async def reply_branded(update: Update, text: str):
-    """Helper to send Markdown-formatted branded replies."""
-    await update.message.reply_text(text, parse_mode="Markdown")
+# =========================
+# UTILITIES
+# =========================
 
-# ---------- /start and /help ----------
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await reply_branded(update,
-        "👋 Hey! I'm My Errand Guy Bot.\n\n"
-        "Use me to register, track, and close errands.\n\n"
-        "🏁 /newerrand Requester Receiver Pickup Dropoff\n"
-        "👤 /assign <id> <driver>\n"
-        "🔄 /update <id> <status>\n"
-        "✅ /complete <id>\n"
-        "❌ /cancel <id>\n"
-        "💰 /pay <id>\n"
-        "💸 /unpay <id>\n"
-        "📊 /summary\n"
-        "ℹ /help\n\n"
-        "Delivery confirmations:\n"
-        "Driver sends Errand #1234 OTP 9999 to confirm handover.\n\n"
-        "We run so you don’t have to 🧡"
-    )
+def now_local_str():
+    tz = pytz.timezone(LOCAL_TZ)
+    return datetime.datetime.now(tz).strftime("%Y-%m-%d %H:%M:%S")
 
-async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await reply_branded(update,
-        "📖 My Errand Guy — Command Help\n\n"
-        "🏁 Create new errand:\n"
-        "/newerrand Requester Receiver Pickup Dropoff\n"
-        "Use _ instead of spaces in names/locations.\n"
-        "Example:\n"
-        "/newerrand Olivia Paul Home_Affairs French_Embassy\n\n"
-        "👤 Assign driver:\n"
-        "/assign 6199 Heino\n\n"
-        "🔄 Update status:\n"
-        "/update 6199 In_Progress\n"
-        "/update 6199 Pending\n"
-        "/update 6199 En_Route\n"
-        "/update 6199 Delivered\n\n"
-        "✅ Mark complete (delivered):\n"
-        "/complete 6199\n"
-        "Automatically stamps time + sets Status to Delivered.\n\n"
-        "❌ Cancel errand:\n"
-        "/cancel 6199\n\n"
-        "💰 Mark paid / unpaid:\n"
-        "/pay 6199\n"
-        "/unpay 6199\n\n"
-        "📊 Daily summary (today only):\n"
-        "/summary\n\n"
-        "🚚 Driver delivery confirmation:\n"
-        "Errand #6199 OTP 1234\n"
-        "— marks Delivered if OTP matches.\n\n"
-        "We run so you don’t have to 🧡"
-    )
+def today_local_date():
+    tz = pytz.timezone(LOCAL_TZ)
+    return datetime.datetime.now(tz).strftime("%Y-%m-%d")
 
-# ---------- /newerrand ----------
-async def new_errand(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # /newerrand Requester Receiver Pickup Dropoff
-    try:
-        requester, receiver, pickup, dropoff = context.args[0:4]
-    except:
-        await reply_branded(update,
-            "Usage:\n"
-            "/newerrand Requester Receiver Pickup Dropoff\n"
-            "Example:\n"
-            "/newerrand Olivia Paul Home_Affairs French_Embassy"
-        )
-        return
+def generate_errand_id():
+    # Example: EG-20251102-8421  (EG + date + random 4 digits)
+    tz = pytz.timezone(LOCAL_TZ)
+    now = datetime.datetime.now(tz)
+    date_part = now.strftime("%Y%m%d")
+    rnd = random.randint(1000, 9999)
+    return f"EG-{date_part}-{rnd}"
 
-    # Generate errand id + OTP
-    errand_id = str(random.randint(1000, 9999))
-    otp = str(random.randint(1000, 9999))
-    timestamp = now_timestamp()
+def generate_otp():
+    return str(random.randint(1000, 9999))
 
-    # Append to sheet
-    sheet.append_row([
-        f"#{errand_id}",
+def append_errand_row(errand_id, requester, receiver, pickup, dropoff, otp):
+    timestamp = now_local_str()
+    status = "Pending"
+    driver = ""
+    paid = "N"
+    row = [
+        errand_id,
         requester,
         receiver,
         pickup,
         dropoff,
-        "Pending",
+        status,
         otp,
-        update.effective_user.first_name,
+        driver,
         timestamp,
-        "No"
-    ])
+        paid,
+    ]
+    sheet.append_row(row, value_input_option="USER_ENTERED")
 
-    await reply_branded(update,
-        "🏁 New Errand Logged!\n"
-        f"Errand #{errand_id} created.\n"
-        f"Pickup: {pickup.replace('',' ')} → Drop-off: {dropoff.replace('',' ')}\n"
-        f"Requester: {requester.replace('',' ')} | Receiver: {receiver.replace('',' ')}\n"
-        f"🔐 OTP for receiver: {otp}\n\n"
-        "Your job is in the system.\n"
-        "My Errand Guy is on the move 🏃‍♂💨"
-    )
+def find_row_by_errand_id(eid):
+    """
+    Returns (row_index, row_values) or (None, None)
+    row_index is the actual sheet row number (1-based in Google Sheets)
+    """
+    all_ids = sheet.col_values(COL_ID)
+    # first row is likely headers on row 1, so start at row 2
+    for idx in range(2, len(all_ids) + 1):
+        if all_ids[idx - 1] == eid:
+            return idx, sheet.row_values(idx)
+    return None, None
 
-# ---------- /assign ----------
-async def assign_driver(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # /assign <id> <driver>
-    try:
-        errand_id, driver_name = context.args[0], context.args[1]
-    except:
-        await reply_branded(update, "Usage:\n`/assign <id> <driver>\nExample:\n/assign 6199 Heino`")
-        return
+def update_cell(row_idx, col_idx, value):
+    sheet.update_cell(row_idx, col_idx, value)
 
-    row = find_errand_row(errand_id)
-    if not row:
-        await reply_branded(update,
-            f"⚠ Oops! I couldn't find Errand #{errand_id}.\n"
-            "Please double-check the ID and try again."
-        )
-        return
+def update_errand_status(eid, new_status):
+    row_idx, row_vals = find_row_by_errand_id(eid)
+    if not row_idx:
+        return False
+    update_cell(row_idx, COL_STATUS, new_status)
+    # if marking Delivered / Complete we also stamp new timestamp
+    if new_status.lower() in ["delivered", "complete", "completed"]:
+        update_cell(row_idx, COL_TIMESTAMP, now_local_str())
+    return True
 
-    sheet.update_cell(row, COL_DRIVER, driver_name)
+def assign_driver(eid, driver_name):
+    row_idx, _ = find_row_by_errand_id(eid)
+    if not row_idx:
+        return False
+    update_cell(row_idx, COL_DRIVER, driver_name)
+    # if status was Pending, bump to "In Progress"
+    current_status = sheet.cell(row_idx, COL_STATUS).value
+    if current_status.lower() == "pending":
+        update_cell(row_idx, COL_STATUS, "In Progress")
+    return True
 
-    await reply_branded(update,
-        "🚗 Driver Assigned\n"
-        f"Driver {driver_name} is now assigned to Errand #{errand_id}.\n"
-        "They’re gearing up to get it done 💪"
-    )
+def mark_paid(eid, paid_value):
+    # paid_value should be "Y" or "N"
+    row_idx, _ = find_row_by_errand_id(eid)
+    if not row_idx:
+        return False
+    update_cell(row_idx, COL_PAID, paid_value)
+    return True
 
-# ---------- /update ----------
-async def update_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # /update <id> <status>
-    try:
-        errand_id, new_status = context.args[0], context.args[1]
-    except:
-        await reply_branded(update,
-            "Usage:\n`/update <id> <status>\nExample:\n/update 6199 In_Progress`"
-        )
-        return
+def get_today_summary():
+    # read all rows
+    all_rows = sheet.get_all_values()
+    # skip header row
+    body_rows = all_rows[1:]
 
-    row = find_errand_row(errand_id)
-    if not row:
-        await reply_branded(update,
-            f"⚠ Oops! I couldn't find Errand #{errand_id}.\n"
-            "Please double-check the ID and try again."
-        )
-        return
+    today_str = today_local_date()
 
-    status_clean = new_status.replace('_', ' ')
-    sheet.update_cell(row, COL_STATUS, status_clean)
+    pending = 0
+    in_progress = 0
+    delivered = 0
+    canceled = 0
 
-    await reply_branded(update,
-        "🔄 Status Update\n"
-        f"Errand #{errand_id} is now *{status_clean}*.\n"
-        "We're already on the move! 🏃‍♂💨"
-    )
+    paid = 0
+    unpaid = 0
 
-# ---------- /complete ----------
-async def complete_errand(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # /complete <id>
-    try:
-        errand_id = context.args[0]
-    except:
-        await reply_branded(update,
-            "Usage:\n`/complete <id>\nExample:\n/complete 6199`"
-        )
-        return
-
-    row = find_errand_row(errand_id)
-    if not row:
-        await reply_branded(update,
-            f"⚠ Hmm... Errand #{errand_id} not found.\n"
-            "Please check the ID."
-        )
-        return
-
-    # Mark Status = Delivered, Timestamp = now
-    sheet.update_cell(row, COL_STATUS, "Delivered")
-    sheet.update_cell(row, COL_TIMESTAMP, now_timestamp())
-
-    await reply_branded(update,
-        "✅ Delivery Complete!\n"
-        f"Errand #{errand_id} is marked as Delivered.\n"
-        "Timestamp captured. Great work team 📦💨"
-    )
-
-# ---------- /cancel ----------
-async def cancel_errand(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # /cancel <id>
-    try:
-        errand_id = context.args[0]
-    except:
-        await reply_branded(update,
-            "Usage:\n`/cancel <id>\nExample:\n/cancel 6199`"
-        )
-        return
-
-    row = find_errand_row(errand_id)
-    if not row:
-        await reply_branded(update,
-            f"⚠ Couldn't find Errand #{errand_id}.\n"
-            "Check the ID and try again."
-        )
-        return
-
-    sheet.update_cell(row, COL_STATUS, "Canceled")
-    sheet.update_cell(row, COL_TIMESTAMP, now_timestamp())
-
-    await reply_branded(update,
-        "❌ Errand Canceled\n"
-        f"Errand #{errand_id} is now marked as Canceled.\n"
-        "We'll be ready when you are 💪"
-    )
-
-# ---------- /pay ----------
-async def mark_paid(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # /pay <id>
-    try:
-        errand_id = context.args[0]
-    except:
-        await reply_branded(update,
-            "Usage:\n`/pay <id>\nExample:\n/pay 6199`"
-        )
-        return
-
-    row = find_errand_row(errand_id)
-    if not row:
-        await reply_branded(update,
-            f"⚠ Couldn't find Errand #{errand_id}. Check the ID."
-        )
-        return
-
-    sheet.update_cell(row, COL_PAID, "Yes")
-
-    await reply_branded(update,
-        "💰 Payment Confirmed!\n"
-        f"Errand #{errand_id} marked as Paid.\n"
-        "Thank you for using My Errand Guy — we run so you don’t have to 🧡"
-    )
-
-# ---------- /unpay ----------
-async def mark_unpaid(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # /unpay <id>
-    try:
-        errand_id = context.args[0]
-    except:
-        await reply_branded(update,
-            "Usage:\n`/unpay <id>\nExample:\n/unpay 6199`"
-        )
-        return
-
-    row = find_errand_row(errand_id)
-    if not row:
-        await reply_branded(update,
-            f"⚠ Couldn't find Errand #{errand_id}. Check the ID."
-        )
-        return
-
-    sheet.update_cell(row, COL_PAID, "No")
-
-    await reply_branded(update,
-        "💸 Payment Reverted\n"
-        f"Errand #{errand_id} marked as Unpaid.\n"
-        "Please review outstanding balance ⚠"
-    )
-
-# ---------- /summary ----------
-async def summary_today(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Build summary for today only based on Timestamp date
-    rows = get_all_records_with_rows()
-    today = today_date_str()
-
-    total_pending = 0
-    total_in_progress = 0
-    total_delivered = 0
-    total_canceled = 0
-
-    paid_yes = 0
-    paid_no = 0
-
-    for row_num, data in rows:
-        ts = str(data.get('Timestamp', ''))
-        # check if ts starts with today's YYYY-MM-DD
-        if not ts.startswith(today):
+    for r in body_rows:
+        # r = [ID, Requester, Receiver, Pickup, Dropoff, Status, OTP, Driver, Timestamp, Paid]
+        if len(r) < 10:
             continue
 
-        status = data.get('Status', '').strip().lower()
-        paid = data.get('Paid (Y/N)', '').strip().lower()
+        timestamp = r[COL_TIMESTAMP - 1]  # string "YYYY-mm-dd HH:MM:SS"
+        status = r[COL_STATUS - 1].strip() if r[COL_STATUS - 1] else ""
+        paid_flag = r[COL_PAID - 1].strip().upper() if r[COL_PAID - 1] else ""
 
-        if status == "pending":
-            total_pending += 1
-        elif "progress" in status or "route" in status or "in progress" in status:
-            total_in_progress += 1
-        elif status == "delivered":
-            total_delivered += 1
-        elif status == "canceled" or status == "cancelled":
-            total_canceled += 1
+        # only count if job happened today
+        # we match date part of timestamp == today_str
+        if timestamp.startswith(today_str):
+            if status.lower() == "pending":
+                pending += 1
+            elif status.lower() in ["in progress", "in_progress", "inprogress"]:
+                in_progress += 1
+            elif status.lower() in ["delivered", "complete", "completed"]:
+                delivered += 1
+            elif status.lower() in ["canceled", "cancelled"]:
+                canceled += 1
 
-        if paid == "yes":
-            paid_yes += 1
-        elif paid == "no":
-            paid_no += 1
+            if paid_flag == "Y":
+                paid += 1
+            else:
+                unpaid += 1
 
     msg = (
-        "📊 Today’s Summary\n"
-        f"Date: {today}\n\n"
-        f"⏳ Pending: {total_pending}\n"
-        f"🔄 In Progress: {total_in_progress}\n"
-        f"✅ Delivered: {total_delivered}\n"
-        f"❌ Canceled: {total_canceled}\n\n"
-        f"💰 Paid: {paid_yes}\n"
-        f"💸 Unpaid: {paid_no}\n\n"
-        "Keep running strong, team 💨"
+        f"📊 Today’s Summary\n"
+        f"Date: {today_str}\n\n"
+        f"⏳ Pending: {pending}\n"
+        f"🔄 In Progress: {in_progress}\n"
+        f"✅ Delivered: {delivered}\n"
+        f"❌ Canceled: {canceled}\n\n"
+        f"💰 Paid: {paid}\n"
+        f"💸 Unpaid: {unpaid}\n\n"
+        f"Keep running strong, team 💨"
     )
+    return msg
 
-    await reply_branded(update, msg)
+# =========================
+# COMMAND HANDLERS
+# =========================
 
-# ---------- OTP VERIFICATION FROM DRIVER ----------
-async def verify_otp(update: Update, context: ContextTypes.DEFAULT_TYPE):
+def help_cmd(update, context):
+    text = (
+        "👋 Hey! I'm My Errand Guy Bot.\n\n"
+        "Use me to register, track, and close errands.\n\n"
+        "🏁 /newerrand <requester> <receiver> <pickup> <dropoff>\n"
+        "👤 /assign <errand_id> <driver>\n"
+        "🔄 /update <errand_id> <status>\n"
+        "✅ /complete <errand_id>\n"
+        "❌ /cancel <errand_id>\n"
+        "💰 /pay <errand_id>\n"
+        "💸 /unpay <errand_id>\n"
+        "📊 /summary\n"
+        "ℹ /help\n\n"
+        "Delivery confirmations:\n"
+        "Driver sends:  Errand #1234 OTP 9999\n\n"
+        "We run so you don’t have to 🧡"
+    )
+    update.message.reply_text(text)
+
+def parse_newerrand_args(args_text):
     """
-    Driver sends text like:
-    "Errand #1234 OTP 5678"
-
-    -> We find errand #1234
-    -> Match stored OTP
-    -> If match, mark Delivered + timestamp
-    -> Reply branded
+    We support two styles:
+    1) /newerrand John Mary PickupLocation DropoffLocation
+    2) /newerrand Requester: John Receiver: Mary Pickup: XYZ Dropoff: ABC
+    We'll try smart extraction.
     """
-    text = update.message.text
-    # Very lightweight pattern check
-    if "Errand" in text and "OTP" in text and "#" in text:
-        try:
-            # Extract errand id
-            after_hash = text.split("#", 1)[1]      # "1234 OTP 5678"
-            errand_id_part = after_hash.split()[0]  # "1234"
-            otp_given = text.split("OTP", 1)[1].strip().split()[0]  # "5678"
-        except:
-            return  # ignore if badly formatted
+    # First try style 1 (simple split)
+    parts = args_text.strip().split()
+    if len(parts) >= 4 and "Requester:" not in args_text and "Receiver:" not in args_text:
+        requester = parts[0]
+        receiver = parts[1]
+        pickup = parts[2]
+        dropoff = " ".join(parts[3:])
+        return requester, receiver, pickup, dropoff
 
-        row = find_errand_row(errand_id_part)
-        if not row:
-            await reply_branded(update,
-                f"⚠ I couldn't find Errand #{errand_id_part}. Check the ID and try again."
-            )
-            return
+    # Fallback: labeled format
+    # We'll just do dumb scanning
+    requester = ""
+    receiver = ""
+    pickup = ""
+    dropoff = ""
 
-        # Get stored OTP + Status
-        cell_otp = sheet.cell(row, COL_OTP).value
-        cell_status = sheet.cell(row, COL_STATUS).value
+    tokens = args_text.replace("\n", " ").split()
+    current_label = None
+    buckets = {"requester": [], "receiver": [], "pickup": [], "dropoff": []}
 
-        if cell_otp == otp_given and cell_status != "Delivered":
-            # Mark delivered + timestamp
-            sheet.update_cell(row, COL_STATUS, "Delivered")
-            sheet.update_cell(row, COL_TIMESTAMP, now_timestamp())
+    for t in tokens:
+        low = t.lower().rstrip(":")
+        if low in ["requester", "receiver", "pickup", "dropoff", "drop-off"]:
+            current_label = "dropoff" if "drop" in low else low
+            continue
+        if current_label:
+            buckets[current_label].append(t)
 
-            await reply_branded(update,
-                "📦 Delivery Confirmed!\n"
-                f"Errand #{errand_id_part} is now Delivered.\n"
-                "Great job team 🙌"
-            )
-        else:
-            await reply_branded(update,
-                f"⚠ OTP didn't match for Errand #{errand_id_part}.\n"
-                "Please double-check with the receiver."
-            )
+    requester = " ".join(buckets["requester"]).strip()
+    receiver = " ".join(buckets["receiver"]).strip()
+    pickup = " ".join(buckets["pickup"]).strip()
+    dropoff = " ".join(buckets["dropoff"]).strip()
 
-# ---------- RUN THE BOT ----------
-app = ApplicationBuilder().token(BOT_TOKEN).build()
+    if requester and receiver and pickup and dropoff:
+        return requester, receiver, pickup, dropoff
 
-app.add_handler(CommandHandler("start", start))
-app.add_handler(CommandHandler("help", help_cmd))
-app.add_handler(CommandHandler("newerrand", new_errand))
-app.add_handler(CommandHandler("assign", assign_driver))
-app.add_handler(CommandHandler("update", update_status))
-app.add_handler(CommandHandler("complete", complete_errand))
-app.add_handler(CommandHandler("cancel", cancel_errand))
-app.add_handler(CommandHandler("pay", mark_paid))
-app.add_handler(CommandHandler("unpay", mark_unpaid))
-app.add_handler(CommandHandler("summary", summary_today))
+    return None, None, None, None
 
-# any non-command text (like "Errand #1234 OTP 5678") goes to OTP verification
-app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, verify_otp))
+def newerrand_cmd(update, context):
+    # everything after /newerrand
+    args_text = update.message.text.replace("/newerrand", "", 1).strip()
 
-app.run_polling()
+    requester, receiver, pickup, dropoff = parse_newerrand_args(args_text)
+
+    if not requester or not receiver or not pickup or not dropoff:
+        usage = (
+            "Usage:\n"
+            "/newerrand Requester Receiver Pickup Dropoff\n"
+            "Example:\n"
+            "/newerrand Martha Paul HomeAffairs FrenchEmbassy\n\n"
+            "Or labeled:\n"
+            "/newerrand Requester: Martha Receiver: Paul Pickup: Home Affairs Dropoff: French Embassy"
+        )
+        update.message.reply_text(usage)
+        return
+
+    # create id + otp
+    eid = generate_errand_id()
+    otp = generate_otp()
+
+    # save row in sheet
+    append_errand_row(eid, requester, receiver, pickup, dropoff, otp)
+
+    # reply
+    reply = (
+        f"🏁 New Errand Logged!\n"
+        f"Errand {eid} created.\n"
+        f"Pickup: {pickup} → Drop-off: {dropoff}\n"
+        f"Requester: {requester} | Receiver: {receiver}\n"
+        f"🔐 OTP for receiver: {otp}\n\n"
+        f"Your job is in the system.\n"
+        f"My Errand Guy is on the move 🏃‍♂💨"
+    )
+    update.message.reply_text(reply)
+
+def assign_cmd(update, context):
+    # /assign <errand_id> <driver>
+    parts = update.message.text.strip().split()
+    if len(parts) < 3:
+        update.message.reply_text("Usage:\n/assign <errand_id> <driver>")
+        return
+    _, eid, driver_name = parts[0], parts[1], " ".join(parts[2:])
+    ok = assign_driver(eid, driver_name)
+    if not ok:
+        update.message.reply_text(f"Could not find {eid}.")
+        return
+    reply = (
+        f"🚗 Driver Assigned\n"
+        f"Driver {driver_name} is now assigned to {eid}.\n"
+        f"They’re gearing up to get it done 💪"
+    )
+    update.message.reply_text(reply)
+
+def update_cmd(update, context):
+    # /update <errand_id> <status>
+    parts = update.message.text.strip().split()
+    if len(parts) < 3:
+        update.message.reply_text("Usage:\n/update <errand_id> <status>\nExample:\n/update EG-20251102-1234 In_Progress")
+        return
+    _, eid, new_status = parts[0], parts[1], " ".join(parts[2:])
+    ok = update_errand_status(eid, new_status)
+    if not ok:
+        update.message.reply_text(f"Could not find {eid}.")
+        return
+    reply = (
+        f"🔄 Status Update\n"
+        f"{eid} is now {new_status}.\n"
+        f"We're already on the move! 🏃‍♂💨"
+    )
+    update.message.reply_text(reply)
+
+def complete_cmd(update, context):
+    # /complete <errand_id>
+    parts = update.message.text.strip().split()
+    if len(parts) < 2:
+        update.message.reply_text("Usage:\n/complete <errand_id>")
+        return
+    eid = parts[1]
+    ok = update_errand_status(eid, "Delivered")
+    if not ok:
+        update.message.reply_text(f"Could not find {eid}.")
+        return
+    reply = (
+        f"✅ Delivery Complete!\n"
+        f"{eid} is marked as Delivered.\n"
+        f"Timestamp captured. Great work team 📦💨"
+    )
+    update.message.reply_text(reply)
+
+def cancel_cmd(update, context):
+    # /cancel <errand_id>
+    parts = update.message.text.strip().split()
+    if len(parts) < 2:
+        update.message.reply_text("Usage:\n/cancel <errand_id>")
+        return
+    eid = parts[1]
+    ok = update_errand_status(eid, "Canceled")
+    if not ok:
+        update.message.reply_text(f"Could not find {eid}.")
+        return
+    reply = (
+        f"❌ Errand Canceled\n"
+        f"{eid} is now canceled."
+    )
+    update.message.reply_text(reply)
+
+def pay_cmd(update, context):
+    # /pay <errand_id>
+    parts = update.message.text.strip().split()
+    if len(parts) < 2:
+        update.message.reply_text("Usage:\n/pay <errand_id>")
+        return
+    eid = parts[1]
+    ok = mark_paid(eid, "Y")
+    if not ok:
+        update.message.reply_text(f"Could not find {eid}.")
+        return
+    reply = (
+        f"💰 Payment Confirmed!\n"
+        f"{eid} marked as Paid.\n"
+        f"Thank you for using My Errand Guy — we run so you don’t have to 🧡"
+    )
+    update.message.reply_text(reply)
+
+def unpay_cmd(update, context):
+    # /unpay <errand_id>
+    parts = update.message.text.strip().split()
+    if len(parts) < 2:
+        update.message.reply_text("Usage:\n/unpay <errand_id>")
+        return
+    eid = parts[1]
+    ok = mark_paid(eid, "N")
+    if not ok:
+        update.message.reply_text(f"Could not find {eid}.")
+        return
+    reply = (
+        f"💸 Payment Reverted\n"
+        f"{eid} marked as Unpaid."
+    )
+    update.message.reply_text(reply)
+
+def summary_cmd(update, context):
+    msg = get_today_summary()
+    update.message.reply_text(msg, parse_mode=ParseMode.MARKDOWN)
+
+def start_cmd(update, context):
+    # simple sanity /start
+    update.message.reply_text("My Errand Guy Bot is live and ready 🏃‍♂💨 Use /help for commands.")
+
+# =========================
+# BOOTSTRAP BOT
+# =========================
+
+def main():
+    updater = Updater(BOT_TOKEN, use_context=True)
+    dp = updater.dispatcher
+
+    dp.add_handler(CommandHandler("start", start_cmd))
+    dp.add_handler(CommandHandler("help", help_cmd))
+    dp.add_handler(CommandHandler("newerrand", newerrand_cmd))
+    dp.add_handler(CommandHandler("assign", assign_cmd))
+    dp.add_handler(CommandHandler("update", update_cmd))
+    dp.add_handler(CommandHandler("complete", complete_cmd))
+    dp.add_handler(CommandHandler("cancel", cancel_cmd))
+    dp.add_handler(CommandHandler("pay", pay_cmd))
+    dp.add_handler(CommandHandler("unpay", unpay_cmd))
+    dp.add_handler(CommandHandler("summary", summary_cmd))
+
+    print("✅ Bot started... Listening for new errands...")
+    updater.start_polling()
+    updater.idle()
+
+if _name_ == "_main_":
+    main()
