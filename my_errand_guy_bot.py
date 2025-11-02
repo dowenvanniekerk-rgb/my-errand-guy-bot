@@ -10,7 +10,7 @@ import pytz
 # ==============================
 # CONFIG
 # ==============================
-BOT_TOKEN = os.environ.get("8291555868:AAEoHFlEDm6hNg5PD4AUm7Y5hO-8aiIQQeU")
+BOT_TOKEN = os.environ.get("BOT_TOKEN")
 SHEET_NAME = os.environ.get("SHEET_NAME")
 SERVICE_ACCOUNT_JSON = os.environ.get("SERVICE_ACCOUNT_JSON")
 LOCAL_TZ = os.environ.get("TIMEZONE", "Africa/Windhoek")
@@ -64,4 +64,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
