@@ -15,7 +15,7 @@ from telegram.ext import (
 )
 
 # ======== Flask Web Server to keep Render alive ========
-app = Flask(_name_)
+app = Flask(__name__)
 
 @app.route("/")
 def home():
@@ -103,3 +103,4 @@ if __name__ == "__main__":
 
     # Run Telegram Bot in main thread
     asyncio.run(run_bot())
+
