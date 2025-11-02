@@ -1,77 +1,105 @@
 import os
 import json
-import gspread
+import random
+import datetime
 import pytz
-from datetime import datetime
+import threading
+from flask import Flask
+import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 from telegram import Update
-from telegram.ext import Application, CommandHandler, ContextTypes
+from telegram.ext import (
+    ApplicationBuilder,
+    CommandHandler,
+    ContextTypes,
+)
 
-# ───────────────────────────────
-#   Environment setup
-# ───────────────────────────────
+# ======== Flask Web Server to keep Render alive ========
+app = Flask(_name_)
+
+@app.route("/")
+def home():
+    return "✅ My Errand Guy Bot is alive and running!"
+
+def run_flask():
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
+
+# ======== Telegram Bot Setup ========
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-SHEET_NAME = os.getenv("SHEET_NAME", "Sheet1")
 SERVICE_ACCOUNT_JSON = os.getenv("SERVICE_ACCOUNT_JSON")
-TIMEZONE = os.getenv("TIMEZONE", "Africa/Windhoek")
+SPREADSHEET_NAME = os.getenv("SPREADSHEET_NAME", "MyErrandGuy")
 
-if not BOT_TOKEN:
-    raise ValueError("❌ BOT_TOKEN missing — check Render environment.")
-if not SERVICE_ACCOUNT_JSON:
-    raise ValueError("❌ SERVICE_ACCOUNT_JSON missing — check Render environment.")
-
-LOCAL_TZ = pytz.timezone(TIMEZONE)
-
-# ───────────────────────────────
-#   Google Sheets setup
-# ───────────────────────────────
+# ======== Google Sheets Auth ========
 creds_dict = json.loads(SERVICE_ACCOUNT_JSON)
-scope = [
-    "https://spreadsheets.google.com/feeds",
-    "https://www.googleapis.com/auth/drive",
-]
+scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
 creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
 client = gspread.authorize(creds)
-sheet = client.open(SHEET_NAME).sheet1
+sheet = client.open(SPREADSHEET_NAME).sheet1
 
-# ───────────────────────────────
-#   Command Handlers
-# ───────────────────────────────
+# ======== Helper Functions ========
+def generate_errand_id():
+    today = datetime.datetime.now().strftime("%Y%m%d")
+    existing = sheet.get_all_values()
+    count_today = sum(1 for row in existing if today in row[0])
+    return f"ERR-{today}-{count_today + 1:03}"
+
+def generate_otp():
+    return str(random.randint(1000, 9999))
+
+# ======== Telegram Bot Commands ========
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "👋 Welcome to My Errand Guy Bot!\n"
-        "Use /newerrand pickup dropoff sender receiver to log your job.",
-        parse_mode="Markdown",
+        "👋 Welcome to My Errand Guy Bot!\n\n"
+        "Use this command to log a new errand:\n"
+        "/newerrand pickup dropoff sender receiver\n\n"
+        "Example:\n"
+        "/newerrand Windhoek_MaeruaMall Rehoboth_Junction John_Doe Mary_Smith",
+        parse_mode="Markdown"
     )
 
 async def new_errand(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    args = context.args
-    if len(args) < 4:
-        await update.message.reply_text("Usage:\n/newerrand pickup dropoff sender receiver")
-        return
-
-    pickup, dropoff, sender, receiver = args[:4]
-    now = datetime.now(LOCAL_TZ).strftime("%Y-%m-%d %H:%M:%S")
-
     try:
-        sheet.append_row([now, pickup, dropoff, sender, receiver])
-        await update.message.reply_text(
-            f"✅ Logged successfully!\n"
-            f"📍Pickup: {pickup}\n📦Dropoff: {dropoff}\n👤Sender: {sender}\n📬Receiver: {receiver}"
-        )
-    except Exception as e:
-        await update.message.reply_text(f"⚠ Failed to write to sheet: {e}")
+        if len(context.args) < 4:
+            await update.message.reply_text("⚠ Please provide pickup, dropoff, sender, and receiver.")
+            return
 
-# ───────────────────────────────
-#   Main App
-# ───────────────────────────────
-def main():
-    app = Application.builder().token(BOT_TOKEN).build()
+        pickup, dropoff, sender, receiver = context.args[:4]
+        timestamp = datetime.datetime.now(pytz.timezone("Africa/Windhoek")).strftime("%Y-%m-%d %H:%M:%S")
+        errand_id = generate_errand_id()
+        otp = generate_otp()
+
+        sheet.append_row([timestamp, errand_id, pickup, dropoff, sender, receiver, otp])
+
+        await update.message.reply_text(
+            f"✅ Errand logged successfully!\n\n"
+            f"🆔 Errand ID: {errand_id}\n"
+            f"📍 Pickup: {pickup}\n"
+            f"📦 Dropoff: {dropoff}\n"
+            f"👤 Sender: {sender}\n"
+            f"📬 Receiver: {receiver}\n"
+            f"🔐 OTP: {otp}",
+            parse_mode="Markdown"
+        )
+
+        print(f"[LOG] {timestamp} | {errand_id} | {pickup} → {dropoff} | OTP: {otp}")
+
+    except Exception as e:
+        await update.message.reply_text(f"❌ Error: {str(e)}")
+
+# ======== Telegram Bot Runner ========
+async def run_bot():
+    app = ApplicationBuilder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("newerrand", new_errand))
+    print("✅ Telegram Bot is now polling for updates...")
+    await app.run_polling()
 
-    print("✅ My Errand Guy Bot is LIVE and polling for updates...")
-    app.run_polling(allowed_updates=Update.ALL_TYPES)
-
+# ======== Main Entrypoint ========
 if __name__ == "__main__":
-    main()
+    import asyncio
+
+    # Run Flask in background thread
+    threading.Thread(target=run_flask).start()
+
+    # Run Telegram Bot in main thread
+    asyncio.run(run_bot())
