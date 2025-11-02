@@ -27,7 +27,7 @@ def run_flask():
 # ======== Telegram Bot Setup ========
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 SERVICE_ACCOUNT_JSON = os.getenv("SERVICE_ACCOUNT_JSON")
-SPREADSHEET_NAME = os.getenv("SPREADSHEET_NAME", "MyErrandGuy")
+SPREADSHEET_NAME = os.getenv("SPREADSHEET_NAME", "ERRAND_LOG")
 
 # ======== Google Sheets Auth ========
 creds_dict = json.loads(SERVICE_ACCOUNT_JSON)
@@ -103,4 +103,5 @@ if __name__ == "__main__":
 
     # Run Telegram Bot in main thread
     asyncio.run(run_bot())
+
 
