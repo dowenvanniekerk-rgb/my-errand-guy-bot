@@ -290,7 +290,6 @@ def run_flask():
 # ======================
 
 async def main():
-    # start telegram app
     tg_app = (
         ApplicationBuilder()
         .token(BOT_TOKEN)
@@ -302,12 +301,8 @@ async def main():
     tg_app.add_handler(CommandHandler("list", list_command))
     tg_app.add_handler(CommandHandler("verify", verify_command))
 
-    # run polling forever
-    await tg_app.initialize()
-    await tg_app.start()
     print("🚚 My Errand Guy Bot is LIVE and polling for updates...")
-    await tg_app.updater.start_polling()
-    await tg_app.updater.idle()
+    await tg_app.run_polling()
 
 if __name__ == "__main__":
     # start Flask in a side thread so Render sees an open port
@@ -316,4 +311,5 @@ if __name__ == "__main__":
 
     # start telegram polling loop
     asyncio.run(main())
+
 
