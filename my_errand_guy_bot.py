@@ -273,7 +273,7 @@ async def verify_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # 5. FLASK KEEPALIVE
 # ======================
 
-app = Flask(_name_)
+app = Flask(__name__)
 
 @app.route("/health")
 def health():
@@ -316,3 +316,4 @@ if __name__ == "__main__":
 
     # start telegram polling loop
     asyncio.run(main())
+
