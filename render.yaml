@@ -1,0 +1,9 @@
+services:
+  - type: web
+    name: my-errand-guy-bot
+    env: python
+    region: oregon
+    plan: free
+    buildCommand: "pip install -r requirements.txt"
+    startCommand: "python my_errand_guy_bot.py"
+    runtime: python-3.11.9
