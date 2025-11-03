@@ -301,7 +301,7 @@ async def main():
     tg_app.add_handler(CommandHandler("list", list_command))
     tg_app.add_handler(CommandHandler("verify", verify_command))
 
-  def run_bot():
+def run_bot():
     print("🚚 My Errand Guy Bot is LIVE and polling for updates...")
     tg_app = (
         ApplicationBuilder()
@@ -325,6 +325,7 @@ if __name__ == "__main__":
     bot_thread.start()
 
     bot_thread.join()
+
 
 
 
