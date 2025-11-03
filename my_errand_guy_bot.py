@@ -301,15 +301,30 @@ async def main():
     tg_app.add_handler(CommandHandler("list", list_command))
     tg_app.add_handler(CommandHandler("verify", verify_command))
 
+  def run_bot():
     print("🚚 My Errand Guy Bot is LIVE and polling for updates...")
-    await tg_app.run_polling()
+    tg_app = (
+        ApplicationBuilder()
+        .token(BOT_TOKEN)
+        .build()
+    )
+
+    tg_app.add_handler(CommandHandler("start", start_command))
+    tg_app.add_handler(CommandHandler("newerrand", newerrand_command))
+    tg_app.add_handler(CommandHandler("list", list_command))
+    tg_app.add_handler(CommandHandler("verify", verify_command))
+
+    tg_app.run_polling()  # note: not awaited
 
 if __name__ == "__main__":
-    # start Flask in a side thread so Render sees an open port
-    t = Thread(target=run_flask, daemon=True)
-    t.start()
+    # Run Flask and Telegram bot in parallel
+    flask_thread = Thread(target=run_flask, daemon=True)
+    flask_thread.start()
 
-    # start telegram polling loop
-    asyncio.run(main())
+    bot_thread = Thread(target=run_bot, daemon=True)
+    bot_thread.start()
+
+    bot_thread.join()
+
 
 
