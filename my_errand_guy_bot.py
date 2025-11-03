@@ -302,6 +302,9 @@ async def main():
     tg_app.add_handler(CommandHandler("verify", verify_command))
 
 def run_bot():
+    import asyncio
+    asyncio.set_event_loop(asyncio.new_event_loop())
+
     print("🚚 My Errand Guy Bot is LIVE and polling for updates...")
     tg_app = (
         ApplicationBuilder()
@@ -314,8 +317,8 @@ def run_bot():
     tg_app.add_handler(CommandHandler("list", list_command))
     tg_app.add_handler(CommandHandler("verify", verify_command))
 
-    tg_app.run_polling()  # note: not awaited
-
+    tg_app.run_polling()
+    
 if __name__ == "__main__":
     # Run Flask and Telegram bot in parallel
     flask_thread = Thread(target=run_flask, daemon=True)
@@ -325,6 +328,7 @@ if __name__ == "__main__":
     bot_thread.start()
 
     bot_thread.join()
+
 
 
 
